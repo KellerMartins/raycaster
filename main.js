@@ -91,11 +91,15 @@ function createGame(mapDiagram) {
     empty: 0,
     wall: 1,
     player: 2,
+    sprite: 3,
+    '' : 0,
     '  ' : 0,
     '##' : 1,
-    'P ' : 2,
-    ' P' : 2,
+    'P' : 2,
+    'S' : 3,
   }
+
+  map.sprites = []
 
   map.diagram = mapDiagram
   var m = mapDiagram.split('\n')
@@ -106,13 +110,16 @@ function createGame(mapDiagram) {
   map.data = [...Array(map.width)].map(x => Array(map.height).fill(map.entities.empty))
   m.map((x, i) => {
     for(let j=0; j<x.length/2; j++) {
-      let ent = map.entities[x.slice(j*2, j*2+2)]
+      let ent = map.entities[x.slice(j*2, j*2+2).trim()]
       map.data[j][i] = ent
 
       if (ent == map.entities.player) {
         map.data[j][i] = map.entities.empty
         player.x = j
         player.y = i
+      } else if (ent == map.entities.sprite) {
+        map.data[j][i] = map.entities.empty
+        map.sprites.push({x:j, y:i})
       }
     }
   })
@@ -120,65 +127,48 @@ function createGame(mapDiagram) {
   return {map: map, player: player}
 }
 
-let g = createGame(`
-  ####################
-  ##                ##
-  ##  P     ##########
-  ##        ##      ##
-  ##                ##
-  ####  ######      ##
-  ##        ##      ##
-  ##        ##      ##
-  ##        ##      ##
-  ####################
-`)
-
-// Run game
-;(update = function(deltaTime) {
-  let start = Date.now()
-
-  // Render background color
-  let ceilcol = {r:28, g:22, b:30}
+function renderBackground(renderbuffer) {
   for (let x = 0; x < width; x++) {
     for (let y = 0; y < height; y++) {
       let t = (y-height/2)/(height/2)
-      let col = y < height/2 ? ceilcol : 
+      let col = y < height/2 ? {r:28, g:22, b:30} : 
                               {r:53*t + 23*(1-t),
                                g:47*t + 21*(1-t),
                                b:56*t + 26*(1-t)}
       let i = x + y*width
-      image[i*4]     = col.r
-      image[i*4 + 1] = col.g
-      image[i*4 + 2] = col.b
-      image[i*4 + 3] = 255
+      renderbuffer[i*4]     = col.r
+      renderbuffer[i*4 + 1] = col.g
+      renderbuffer[i*4 + 2] = col.b
+      renderbuffer[i*4 + 3] = 255
     }
   }
+}
 
-  // Render 3D view
-  var maxdist = Math.ceil(Math.sqrt(g.map.width*g.map.width + g.map.height*g.map.height))
+function renderScene(renderbuffer, depth, g) {
+  let fogcol = {r:28, g:22, b:30}
   for (let x = 0; x < width; x++) {
     
     let angle = g.player.angle + (g.player.fov*(x/width - 0.5))*Math.PI/180
     let dx = Math.cos(angle)
     let dy = Math.sin(angle)
 
-    /*
+    
     // Original, constant step
-    for (var d = 0.1; d < 10; d+=depthStep) {
-      let yi = Math.round(g.player.y + dy*d)
-      let xi = Math.round(g.player.x + dx*d)
-      if (xi >= g.map.width || xi < 0 ||
-          yi >= g.map.height || yi < 0 ||
-          g.map.data[xi][yi] === g.map.entities.wall)
-      {
-        break
-      }
-    }*/
+    //for (var d = 0.1; d < 10; d+=depthStep) {
+    //  let yi = Math.round(g.player.y + dy*d)
+    //  let xi = Math.round(g.player.x + dx*d)
+    //  if (xi >= g.map.width || xi < 0 ||
+    //      yi >= g.map.height || yi < 0 ||
+    //      g.map.data[xi][yi] === g.map.entities.wall)
+    //  {
+    //    break
+    //  }
+    //}
     
 
     // Optimized, variable step
     var step = depthStep
-    for (var d = 0.02; d < maxdist; d+=step) {
+    for (var d = 0.02; d < depth[x]; d+=step) {
       let yi = Math.round(g.player.y + dy*d)
       let xi = Math.round(g.player.x + dx*d)
       if (xi >= g.map.width || xi < 0 ||
@@ -205,6 +195,9 @@ let g = createGame(`
         step = depthStep;
       }
     }
+
+    depth[x] = d
+
     // Lighting values
     let fog = Math.max(1-d/5, 0);
     let torch = Math.max(1-d/2, 0);
@@ -227,14 +220,76 @@ let g = createGame(`
                   [Math.floor(u*g.map.textures.wall.width)]
                   [Math.floor(v*g.map.textures.wall.height)]
 
-      image[i*4]     = Math.round(col[0]*(fog+torch) + ceilcol.r*(1-fog))
-      image[i*4 + 1] = Math.round(col[1]*(fog+torch*0.75) + ceilcol.g*(1-fog))
-      image[i*4 + 2] = Math.round(col[2]*fog + ceilcol.b*(1-fog))
-      image[i*4 + 3] = 255
+      renderbuffer[i*4]     = Math.round(col[0]*(fog+torch) + fogcol.r*(1-fog))
+      renderbuffer[i*4 + 1] = Math.round(col[1]*(fog+torch*0.5) + fogcol.g*(1-fog))
+      renderbuffer[i*4 + 2] = Math.round(col[2]*fog + fogcol.b*(1-fog))
+      renderbuffer[i*4 + 3] = 255
     }
   }
+}
 
-  // Render map
+function renderSprites(renderbuffer, depth, g) {
+  let fogcol = {r:28, g:22, b:30}
+  for (let s of g.map.sprites) {
+    let diffx = s.x - g.player.x
+    let diffy = s.y - g.player.y
+    let spritedir = Math.atan2(diffy, diffx)
+
+    while (spritedir - g.player.angle >  Math.PI) spritedir -= 2*Math.PI; 
+    while (spritedir - g.player.angle < -Math.PI) spritedir += 2*Math.PI;
+
+    let d = Math.sqrt(diffx*diffx + diffy*diffy)
+
+    // Draw sprite line
+    let spritesize = Math.round(Math.min(1000, height/d))
+    let offsetx = Math.round((spritedir - g.player.angle) * width / (g.player.fov*Math.PI/180) + width/2 - spritesize/2)
+    let offsety = Math.round(height/2 - spritesize/2)
+
+    // Lighting values
+    let fog = Math.max(1-d/5, 0);
+    let torch = Math.max(1-d/2, 0);
+
+    for (let sx = 0; sx < spritesize; sx++) {
+      let x = offsetx+sx
+      if(x < 0 || x > width || depth[x] < d)
+        continue
+      depth[x] = d
+      for (let sy = 0; sy < spritesize; sy++) {
+        let y = offsety+sy
+        if(y < 0 || y > height)
+          continue
+
+        let i = x + y*width
+        let u = sx/spritesize
+        let v = sy/spritesize
+
+        let col = g.map.textures.wall.data
+                    [Math.floor(u*g.map.textures.wall.width)]
+                    [Math.floor(v*g.map.textures.wall.height)]
+
+        renderbuffer[i*4]     = Math.round(col[0]*(fog+torch) + fogcol.r*(1-fog))
+        renderbuffer[i*4 + 1] = Math.round(col[1]*(fog+torch*0.5) + fogcol.g*(1-fog))
+        renderbuffer[i*4 + 2] = Math.round(col[2]*fog + fogcol.b*(1-fog))
+        renderbuffer[i*4 + 3] = 255
+      }
+    }
+  }
+}
+
+let g = createGame(`
+  ####################
+  ##                ##
+  ##  P     ##########
+  ##        ##      ##
+  ##  S S           ##
+  ####S ######      ##
+  ##        ##      ##
+  ##        ##      ##
+  ##        ##      ##
+  ####################
+`)
+
+function renderUI(renderbuffer, g) {
   let mapScale = 8
   let entityScale = 4
   for (let x = 0; x < g.map.width; x++) {
@@ -248,10 +303,10 @@ let g = createGame(`
       for (let px=0; px < scale; px++){
         for (let py=0; py < scale; py++){
           let i = x*mapScale+px-(mapScale-scale)/2 + (y*mapScale+py-(mapScale-scale)/2)*width
-          image[i*4]     = col.r * 255
-          image[i*4 + 1] = col.g * 255
-          image[i*4 + 2] = col.b * 255
-          image[i*4 + 3] = 255
+          renderbuffer[i*4]     = col.r * 255
+          renderbuffer[i*4 + 1] = col.g * 255
+          renderbuffer[i*4 + 2] = col.b * 255
+          renderbuffer[i*4 + 3] = 255
         }
       }
     }
@@ -262,12 +317,25 @@ let g = createGame(`
     for (let py=0; py < entityScale; py++){
       let i = Math.round(g.player.x*mapScale+px+(mapScale-entityScale)/2) + 
               Math.round(g.player.y*mapScale+py+(mapScale-entityScale)/2)*width
-      image[i*4]     = 0
-      image[i*4 + 1] = 255
-      image[i*4 + 2] = 0
-      image[i*4 + 3] = 255
+      renderbuffer[i*4]     = 0
+      renderbuffer[i*4 + 1] = 255
+      renderbuffer[i*4 + 2] = 0
+      renderbuffer[i*4 + 3] = 255
     }
   }
+}
+
+// Run game
+;(update = function(deltaTime) {
+  let start = Date.now()
+  debugText.textContent = ""
+
+  // Render to imgdata data array
+  var depth = Array(width).fill(Math.ceil(Math.sqrt(g.map.width*g.map.width + g.map.height*g.map.height)))
+  renderBackground(image)
+  renderScene(image, depth, g)
+  renderSprites(image, depth, g)
+  renderUI(image, g)
 
   // Pass data to canvas
   ctx.putImageData(imgdata, 0, 0)
@@ -290,7 +358,7 @@ let g = createGame(`
 
   // Calculate delta time
   deltaTime = (Date.now() - start)/1000
-  debugText.textContent = deltaTime*1000 + " ms"
+  debugText.textContent += deltaTime*1000 + " ms"
   
-  setTimeout(update, 0, deltaTime)
+  setTimeout(update, Math.max(0, 30-deltaTime), deltaTime)
 })(0)
